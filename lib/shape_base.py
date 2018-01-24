@@ -4,7 +4,7 @@ import warnings
 
 import numpy.core.numeric as _nx
 from numpy.core.numeric import (
-    asarray, zeros, outer, concatenate, isscalar, array, asanyarray
+    asarray, zeros, outer, concatenate, array, asanyarray
     )
 from numpy.core.fromnumeric import product, reshape, transpose
 from numpy.core.multiarray import normalize_axis_index
@@ -27,14 +27,32 @@ def apply_along_axis(func1d, axis, arr, *args, **kwargs):
     Execute `func1d(a, *args)` where `func1d` operates on 1-D arrays and `a`
     is a 1-D slice of `arr` along `axis`.
 
+    This is equivalent to (but faster than) the following use of `ndindex` and
+    `s_`, which sets each of ``ii``, ``jj``, and ``kk`` to a tuple of indices::
+
+        Ni, Nk = a.shape[:axis], a.shape[axis+1:]
+        for ii in ndindex(Ni):
+            for kk in ndindex(Nk):
+                f = func1d(arr[ii + s_[:,] + kk])
+                Nj = f.shape
+                for jj in ndindex(Nj):
+                    out[ii + jj + kk] = f[jj]
+
+    Equivalently, eliminating the inner loop, this can be expressed as::
+
+        Ni, Nk = a.shape[:axis], a.shape[axis+1:]
+        for ii in ndindex(Ni):
+            for kk in ndindex(Nk):
+                out[ii + s_[...,] + kk] = func1d(arr[ii + s_[:,] + kk])
+
     Parameters
     ----------
-    func1d : function
+    func1d : function (M,) -> (Nj...)
         This function should accept 1-D arrays. It is applied to 1-D
         slices of `arr` along the specified axis.
     axis : integer
         Axis along which `arr` is sliced.
-    arr : ndarray
+    arr : ndarray (Ni..., M, Nk...)
         Input array.
     args : any
         Additional arguments to `func1d`.
@@ -46,11 +64,11 @@ def apply_along_axis(func1d, axis, arr, *args, **kwargs):
 
     Returns
     -------
-    apply_along_axis : ndarray
-        The output array. The shape of `outarr` is identical to the shape of
+    out : ndarray  (Ni..., Nj..., Nk...)
+        The output array. The shape of `out` is identical to the shape of
         `arr`, except along the `axis` dimension. This axis is removed, and
         replaced with new dimensions equal to the shape of the return value
-        of `func1d`. So if `func1d` returns a scalar `outarr` will have one
+        of `func1d`. So if `func1d` returns a scalar `out` will have one
         fewer dimensions than `arr`.
 
     See Also
@@ -85,11 +103,9 @@ def apply_along_axis(func1d, axis, arr, *args, **kwargs):
     array([[[1, 0, 0],
             [0, 2, 0],
             [0, 0, 3]],
-
            [[4, 0, 0],
             [0, 5, 0],
             [0, 0, 6]],
-
            [[7, 0, 0],
             [0, 8, 0],
             [0, 0, 9]]])
@@ -240,14 +256,20 @@ def expand_dims(a, axis):
     """
     Expand the shape of an array.
 
-    Insert a new axis, corresponding to a given position in the array shape.
+    Insert a new axis that will appear at the `axis` position in the expanded
+    array shape.
+
+    .. note:: Previous to NumPy 1.13.0, neither ``axis < -a.ndim - 1`` nor
+       ``axis > a.ndim`` raised errors or put the new axis where documented.
+       Those axis values are now deprecated and will raise an AxisError in the
+       future.
 
     Parameters
     ----------
     a : array_like
         Input array.
     axis : int
-        Position (amongst axes) where new axis is to be inserted.
+        Position in the expanded axes where the new axis is placed.
 
     Returns
     -------
@@ -275,7 +297,7 @@ def expand_dims(a, axis):
     >>> y.shape
     (1, 2)
 
-    >>> y = np.expand_dims(x, axis=1)  # Equivalent to x[:,newaxis]
+    >>> y = np.expand_dims(x, axis=1)  # Equivalent to x[:,np.newaxis]
     >>> y
     array([[1],
            [2]])
@@ -291,7 +313,16 @@ def expand_dims(a, axis):
     """
     a = asarray(a)
     shape = a.shape
-    axis = normalize_axis_index(axis, a.ndim + 1)
+    if axis > a.ndim or axis < -a.ndim - 1:
+        # 2017-05-17, 1.13.0
+        warnings.warn("Both axis > a.ndim and axis < -a.ndim - 1 are "
+                      "deprecated and will raise an AxisError in the future.",
+                      DeprecationWarning, stacklevel=2)
+    # When the deprecation period expires, delete this if block,
+    if axis < 0:
+        axis = axis + a.ndim + 1
+    # and uncomment the following line.
+    # axis = normalize_axis_index(axis, a.ndim + 1)
     return a.reshape(shape[:axis] + (1,) + shape[axis:])
 
 row_stack = vstack
@@ -317,7 +348,7 @@ def column_stack(tup):
 
     See Also
     --------
-    hstack, vstack, concatenate
+    stack, hstack, vstack, concatenate
 
     Examples
     --------
@@ -341,25 +372,26 @@ def dstack(tup):
     """
     Stack arrays in sequence depth wise (along third axis).
 
-    Takes a sequence of arrays and stack them along the third axis
-    to make a single array. Rebuilds arrays divided by `dsplit`.
-    This is a simple way to stack 2D arrays (images) into a single
-    3D array for processing.
+    This is equivalent to concatenation along the third axis after 2-D arrays
+    of shape `(M,N)` have been reshaped to `(M,N,1)` and 1-D arrays of shape
+    `(N,)` have been reshaped to `(1,N,1)`. Rebuilds arrays divided by
+    `dsplit`.
 
-    This function continues to be supported for backward compatibility, but
-    you should prefer ``np.concatenate`` or ``np.stack``. The ``np.stack``
-    function was added in NumPy 1.10.
+    This function makes most sense for arrays with up to 3 dimensions. For
+    instance, for pixel-data with a height (first axis), width (second axis),
+    and r/g/b channels (third axis). The functions `concatenate`, `stack` and
+    `block` provide more general stacking and concatenation operations.
 
     Parameters
     ----------
     tup : sequence of arrays
-        Arrays to stack. All of them must have the same shape along all
-        but the third axis.
+        The arrays must have the same shape along all but the third axis.
+        1-D or 2-D arrays must have the same shape.
 
     Returns
     -------
     stacked : ndarray
-        The array formed by stacking the given arrays.
+        The array formed by stacking the given arrays, will be at least 3-D.
 
     See Also
     --------
@@ -368,11 +400,6 @@ def dstack(tup):
     hstack : Stack along second axis.
     concatenate : Join a sequence of arrays along an existing axis.
     dsplit : Split array along third axis.
-
-    Notes
-    -----
-    Equivalent to ``np.concatenate(tup, axis=2)`` if `tup` contains arrays that
-    are at least 3-dimensional.
 
     Examples
     --------
@@ -408,7 +435,9 @@ def array_split(ary, indices_or_sections, axis=0):
     Please refer to the ``split`` documentation.  The only difference
     between these functions is that ``array_split`` allows
     `indices_or_sections` to be an integer that does *not* equally
-    divide the axis.
+    divide the axis. For an array of length l that should be split
+    into n sections, it returns l % n sub-arrays of size l//n + 1
+    and the rest of size l//n.
 
     See Also
     --------
@@ -419,6 +448,10 @@ def array_split(ary, indices_or_sections, axis=0):
     >>> x = np.arange(8.0)
     >>> np.array_split(x, 3)
         [array([ 0.,  1.,  2.]), array([ 3.,  4.,  5.]), array([ 6.,  7.])]
+
+    >>> x = np.arange(7.0)
+    >>> np.array_split(x, 3)
+        [array([ 0.,  1.,  2.]), array([ 3.,  4.]), array([ 5.,  6.])]
 
     """
     try:
